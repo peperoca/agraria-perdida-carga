@@ -127,11 +127,14 @@ header{background:var(--blue);padding:calc(env(safe-area-inset-top,0px)+10px) 14
 .mbtn-cancel{background:var(--surface2);color:var(--tx2);}
 /* print */
 @media print{
-  header,.btn-ta,.action-row,#saveload-card,.thdr button{display:none!important;}
-  body{background:#fff;color:#000;padding:0;}
-  .container{max-width:100%;padding:8px;}
-  .card,.tramo{break-inside:avoid;border:1px solid #ccc!important;}
+  header{position:fixed;top:0;left:0;right:0;z-index:999;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  .hbtn{display:none!important;}
+  .btn-ta,.action-row,#saveload-card,.thdr button,.btn-dt{display:none!important;}
+  body{background:#fff;color:#000;padding:0;margin:0;}
+  .container{max-width:100%;padding:8px;margin-top:80px;}
+  .card,.tramo{break-inside:avoid;border:1px solid #ccc!important;background:#fff!important;}
   #diag-wrap{overflow:visible!important;}
+  .rcard,.pcard,.info-row{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 }
 </style>
 </head>
@@ -174,6 +177,7 @@ header{background:var(--blue);padding:calc(env(safe-area-inset-top,0px)+10px) 14
     <div class="action-row" style="margin-top:0;">
       <button class="abtn abtn-save" onclick="saveData()">💾 Guardar</button>
       <button class="abtn abtn-load" onclick="loadData()">📂 Cargar</button>
+      <button class="abtn" style="background:var(--db);color:var(--dt);" onclick="resetData()">🗑 Nuevo</button>
       <button class="abtn abtn-print" onclick="printCalc()">🖨 Imprimir PDF</button>
       <button class="abtn abtn-email" onclick="showEmailModal()">✉ Enviar por mail</button>
     </div>
@@ -232,10 +236,16 @@ header{background:var(--blue);padding:calc(env(safe-area-inset-top,0px)+10px) 14
     <input type="email" id="mail-user" placeholder="tu@correo.com">
     <label style="font-size:12px;color:var(--tx2);display:block;margin-bottom:4px;">Mensaje adicional (opcional)</label>
     <input type="text" id="mail-msg" placeholder="Ej: Consulta proyecto X">
-    <p style="font-size:11px;color:var(--tx3);margin:6px 0 10px;line-height:1.5;">Se abrirá tu cliente de correo con el resumen del proyecto. Una copia también se enviará a Agraria.</p>
+    <div id="pdf-progress" style="display:none;margin:10px 0;background:var(--ib);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--it);">
+      Generando PDF... por favor esperá.
+    </div>
+    <p style="font-size:11px;color:var(--tx3);margin:6px 0 10px;line-height:1.5;">
+      Se generará un PDF del cálculo y se descargará en tu dispositivo. Luego se abrirá tu cliente de correo — adjuntá el PDF descargado al mail.<br>
+      Una copia también se enviará a Agraria.
+    </p>
     <div class="modal-btns">
       <button class="mbtn mbtn-cancel" onclick="document.getElementById('email-modal').style.display='none'">Cancelar</button>
-      <button class="mbtn mbtn-ok" onclick="sendEmail()">Enviar</button>
+      <button class="mbtn mbtn-ok" id="btn-send-mail" onclick="sendEmail()">Generar PDF y Enviar</button>
     </div>
   </div>
 </div>
@@ -832,8 +842,113 @@ function loadData(){
   }catch(e){alert('Error al cargar: '+e.message);}
 }
 
+function resetData(){
+  if(!confirm('¿Comenzar un proyecto nuevo? Se borrarán todos los datos actuales.')) return;
+  document.getElementById('proj-name').value='';
+  document.getElementById('pmin-bar').value='0';
+  tramos=[];nTid=1;nFid=1;
+  try{localStorage.removeItem('hcarga_autosave');}catch(e){}
+  addTramo();
+  const st=document.getElementById('save-status');
+  st.textContent='Proyecto nuevo creado.';
+  st.style.color='var(--it)';
+  setTimeout(()=>st.textContent='',3000);
+}
+
 function autoSave(){
   try{localStorage.setItem('hcarga_autosave',JSON.stringify(getState()));}catch(e){}
+}
+
+// ─── PDF GENERATION ──────────────────────────────────────────────────────────
+let jspdfReady=false, html2canvasReady=false;
+
+function loadPdfLibs(cb){
+  if(jspdfReady&&html2canvasReady){cb();return;}
+  const st=document.getElementById('save-status');
+  st.textContent='Cargando librerías PDF...';st.style.color='var(--it)';
+  let loaded=0;
+  const done=()=>{loaded++;if(loaded===2){jspdfReady=true;html2canvasReady=true;st.textContent='';cb();}};
+  if(!jspdfReady){
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+    s.onload=done;document.head.appendChild(s);
+  } else done();
+  if(!html2canvasReady){
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+    s.onload=done;document.head.appendChild(s);
+  } else done();
+}
+
+async function generatePdf(filename){
+  // Temporarily expand all tramos for capture
+  const wasOpen=tramos.map(t=>t.open);
+  tramos.forEach(t=>t.open=true);
+  render();
+  await new Promise(r=>setTimeout(r,300));
+  try{
+    const el=document.querySelector('.container');
+    const canvas=await html2canvas(el,{
+      scale:2,useCORS:true,
+      backgroundColor:'#f2f1ec',
+      windowWidth:600,
+      onclone:(doc)=>{
+        // Inject header clone into the captured doc
+        const hdr=doc.querySelector('header');
+        if(hdr){
+          hdr.style.position='relative';
+          hdr.style.display='grid';
+        }
+        // Hide action buttons
+        const btns=doc.querySelectorAll('.action-row,#saveload-card,.btn-ta,.btn-dt');
+        btns.forEach(b=>b.style.display='none');
+      }
+    });
+    const {jsPDF}=window.jspdf;
+    const pdf=new jsPDF({orientation:'p',unit:'mm',format:'a4'});
+    const pageW=pdf.internal.pageSize.getWidth();
+    const pageH=pdf.internal.pageSize.getHeight();
+    const margin=10;
+    const contentW=pageW-margin*2;
+
+    // Header image (captured separately for repeating)
+    const hdrEl=document.querySelector('header');
+    const hdrCanvas=await html2canvas(hdrEl,{scale:2,useCORS:true,backgroundColor:'#185FA5'});
+    const hdrImg=hdrCanvas.toDataURL('image/jpeg',0.92);
+    const hdrH=(hdrCanvas.height/hdrCanvas.width)*contentW;
+
+    // Full content image
+    const img=canvas.toDataURL('image/jpeg',0.92);
+    const imgW=canvas.width,imgH=canvas.height;
+    const ratio=contentW/imgW*2; // *2 because scale:2
+    const totalImgH=imgH*ratio;
+
+    let yPos=margin+hdrH+4; // start below header
+    let remaining=totalImgH;
+    let srcY=0;
+    let pageNum=0;
+
+    while(remaining>0){
+      if(pageNum>0) pdf.addPage();
+      // Draw header on every page
+      pdf.addImage(hdrImg,'JPEG',margin,margin,contentW,hdrH);
+      const availH=pageH-margin-hdrH-4-margin;
+      const sliceH=Math.min(remaining,availH);
+      // Crop the canvas for this slice
+      const sliceCanvas=document.createElement('canvas');
+      sliceCanvas.width=imgW;
+      sliceCanvas.height=Math.min(imgH-srcY*2/ratio, availH/ratio*2);
+      const ctx=sliceCanvas.getContext('2d');
+      ctx.drawImage(canvas,0,srcY*2/ratio,imgW,sliceCanvas.height,0,0,imgW,sliceCanvas.height);
+      pdf.addImage(sliceCanvas.toDataURL('image/jpeg',0.92),'JPEG',margin,margin+hdrH+4,contentW,sliceH);
+      srcY+=availH;remaining-=availH;pageNum++;
+    }
+    pdf.save(filename);
+    return true;
+  } finally {
+    tramos.forEach((t,i)=>t.open=wasOpen[i]);
+    render();
+  }
 }
 
 // ─── PRINT ────────────────────────────────────────────────────────────────────
@@ -844,10 +959,7 @@ function printCalc(){
 // ─── EMAIL ────────────────────────────────────────────────────────────────────
 function showEmailModal(){document.getElementById('email-modal').style.display='flex';}
 
-function sendEmail(){
-  const userEmail=document.getElementById('mail-user').value.trim();
-  const msg=document.getElementById('mail-msg').value.trim();
-  if(!userEmail||!userEmail.includes('@')){alert('Ingresá un correo válido.');return;}
+function buildEmailBody(){
   const s=getState();
   const proj=s.projName||'Sin nombre';
   const v=tramos.filter(t=>t.res);
@@ -856,6 +968,7 @@ function sendEmail(){
   const pmin=getPminMca();
   const Hmin=totalHt+totalDz+pmin;
   const ML={acero:'Acero',pvc:'PVC',pe:'Polietileno'};
+  const msg=document.getElementById('mail-msg').value.trim();
   let body=`CALCULADORA DE PÉRDIDAS HIDRÁULICAS - AGRARIA\n`;
   body+=`======================================================\n`;
   body+=`Proyecto: ${proj}\n`;
@@ -874,15 +987,43 @@ function sendEmail(){
   body+=`  Carga mínima de la bomba: ${Hmin.toFixed(3)} m c.a.\n`;
   body+=`  Caudal Tramo 1: ${tramos[0].caudal} ${QUNITS[tramos[0].qu].lb}\n`;
   body+=`\n------------------------------------------------------\n`;
+  body+=`Adjunto: PDF con el cálculo completo.\n\n`;
   body+=`Calculado con la Calculadora de Pérdidas Hidráulicas de AGRARIA\n`;
   body+=`www.agraria.com.uy\n`;
+  return body;
+}
 
-  const subj=`Cálculo hidráulico: ${proj}`;
-  const agrMail='jroca@agraria.com.uy';
-  // Open user's mail client
-  const mailtoUser=`mailto:${userEmail}?cc=${encodeURIComponent(agrMail)}&subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(body)}`;
-  window.location.href=mailtoUser;
-  document.getElementById('email-modal').style.display='none';
+async function sendEmail(){
+  const userEmail=document.getElementById('mail-user').value.trim();
+  if(!userEmail||!userEmail.includes('@')){alert('Ingresá un correo válido.');return;}
+  const btn=document.getElementById('btn-send-mail');
+  const prog=document.getElementById('pdf-progress');
+  btn.disabled=true;btn.textContent='Generando...';
+  prog.style.display='block';
+  try{
+    await new Promise((res,rej)=>{
+      loadPdfLibs(()=>{res();});
+      setTimeout(()=>rej(new Error('timeout')),15000);
+    });
+    const s=getState();
+    const proj=(s.projName||'calculo-hidraulico').replace(/\s+/g,'-').toLowerCase();
+    const filename=`${proj}-agraria.pdf`;
+    prog.textContent='Generando PDF... puede tardar unos segundos.';
+    await generatePdf(filename);
+    prog.textContent='✓ PDF descargado. Abriendo cliente de correo...';
+    await new Promise(r=>setTimeout(r,1200));
+    const subj=`Cálculo hidráulico: ${s.projName||'Sin nombre'}`;
+    const body=buildEmailBody();
+    const agrMail='jroca@agraria.com.uy';
+    window.location.href=`mailto:${userEmail}?cc=${encodeURIComponent(agrMail)}&subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(body)}`;
+    document.getElementById('email-modal').style.display='none';
+  } catch(e){
+    prog.textContent='';
+    alert('No se pudo generar el PDF. Podés usar "Imprimir PDF" para guardarlo manualmente.\n\nError: '+e.message);
+  } finally {
+    btn.disabled=false;btn.textContent='Generar PDF y Enviar';
+    prog.style.display='none';
+  }
 }
 
 if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
