@@ -881,68 +881,79 @@ function loadPdfLibs(cb){
 }
 
 async function generatePdf(filename){
-  // Temporarily expand all tramos for capture
   const wasOpen=tramos.map(t=>t.open);
   tramos.forEach(t=>t.open=true);
   render();
-  await new Promise(r=>setTimeout(r,300));
+  await new Promise(r=>setTimeout(r,400));
   try{
+    // Force light mode vars for capture
+    const root=document.documentElement;
+    const origStyle=root.getAttribute('style')||'';
+    root.style.setProperty('--bg','#f2f1ec');
+    root.style.setProperty('--surface','#ffffff');
+    root.style.setProperty('--surface2','#f0efea');
+    root.style.setProperty('--surface3','#e4e3dc');
+    root.style.setProperty('--tx','#1a1a18');
+    root.style.setProperty('--tx2','#5f5e5a');
+    root.style.setProperty('--tx3','#888780');
+    root.style.setProperty('--bdr','rgba(0,0,0,0.10)');
+    root.style.setProperty('--bdr2','rgba(0,0,0,0.20)');
+
+    const hideEls=[...document.querySelectorAll('.action-row,#saveload-card,#email-modal,.btn-ta,.btn-dt')];
+    hideEls.forEach(e=>e.style.visibility='hidden');
+
+    // Capture header separately (for repeating)
+    const hdrEl=document.querySelector('header');
+    const hdrCanvas=await html2canvas(hdrEl,{scale:2,useCORS:true,backgroundColor:'#185FA5',logging:false});
+
+    // Capture full content area
     const el=document.querySelector('.container');
-    const canvas=await html2canvas(el,{
-      scale:2,useCORS:true,
-      backgroundColor:'#f2f1ec',
-      windowWidth:600,
-      onclone:(doc)=>{
-        // Inject header clone into the captured doc
-        const hdr=doc.querySelector('header');
-        if(hdr){
-          hdr.style.position='relative';
-          hdr.style.display='grid';
-        }
-        // Hide action buttons
-        const btns=doc.querySelectorAll('.action-row,#saveload-card,.btn-ta,.btn-dt');
-        btns.forEach(b=>b.style.display='none');
-      }
-    });
+    const mainCanvas=await html2canvas(el,{scale:2,useCORS:true,backgroundColor:'#f2f1ec',logging:false});
+
+    // Restore
+    root.setAttribute('style',origStyle);
+    hideEls.forEach(e=>e.style.visibility='');
+
     const {jsPDF}=window.jspdf;
     const pdf=new jsPDF({orientation:'p',unit:'mm',format:'a4'});
-    const pageW=pdf.internal.pageSize.getWidth();
-    const pageH=pdf.internal.pageSize.getHeight();
-    const margin=10;
-    const contentW=pageW-margin*2;
+    const pageW=pdf.internal.pageSize.getWidth();  // ~210mm
+    const pageH=pdf.internal.pageSize.getHeight(); // ~297mm
+    const mg=10;
+    const contentW=pageW-mg*2; // ~190mm
 
-    // Header image (captured separately for repeating)
-    const hdrEl=document.querySelector('header');
-    const hdrCanvas=await html2canvas(hdrEl,{scale:2,useCORS:true,backgroundColor:'#185FA5'});
-    const hdrImg=hdrCanvas.toDataURL('image/jpeg',0.92);
-    const hdrH=(hdrCanvas.height/hdrCanvas.width)*contentW;
+    // Header dimensions in mm
+    const hdrImg=hdrCanvas.toDataURL('image/jpeg',0.95);
+    const hdrH=(hdrCanvas.height/hdrCanvas.width)*contentW; // mm
 
-    // Full content image
-    const img=canvas.toDataURL('image/jpeg',0.92);
-    const imgW=canvas.width,imgH=canvas.height;
-    const ratio=contentW/imgW*2; // *2 because scale:2
-    const totalImgH=imgH*ratio;
+    // Main content: mm per canvas pixel (scale:2 already baked into canvas dimensions)
+    const mmPerPx=contentW/mainCanvas.width;
+    const availH=pageH-mg*2-hdrH-6; // mm available per page for content
+    const sliceHpx=Math.floor(availH/mmPerPx); // canvas pixels that fit per page
 
-    let yPos=margin+hdrH+4; // start below header
-    let remaining=totalImgH;
-    let srcY=0;
-    let pageNum=0;
+    let srcYpx=0, pageNum=0;
 
-    while(remaining>0){
+    while(srcYpx<mainCanvas.height){
       if(pageNum>0) pdf.addPage();
-      // Draw header on every page
-      pdf.addImage(hdrImg,'JPEG',margin,margin,contentW,hdrH);
-      const availH=pageH-margin-hdrH-4-margin;
-      const sliceH=Math.min(remaining,availH);
-      // Crop the canvas for this slice
-      const sliceCanvas=document.createElement('canvas');
-      sliceCanvas.width=imgW;
-      sliceCanvas.height=Math.min(imgH-srcY*2/ratio, availH/ratio*2);
-      const ctx=sliceCanvas.getContext('2d');
-      ctx.drawImage(canvas,0,srcY*2/ratio,imgW,sliceCanvas.height,0,0,imgW,sliceCanvas.height);
-      pdf.addImage(sliceCanvas.toDataURL('image/jpeg',0.92),'JPEG',margin,margin+hdrH+4,contentW,sliceH);
-      srcY+=availH;remaining-=availH;pageNum++;
+
+      // Header on every page
+      pdf.addImage(hdrImg,'JPEG',mg,mg,contentW,hdrH);
+
+      // Slice the canvas for this page
+      const thisSliceHpx=Math.min(sliceHpx, mainCanvas.height-srcYpx);
+      if(thisSliceHpx<=0) break;
+
+      const slice=document.createElement('canvas');
+      slice.width=mainCanvas.width;
+      slice.height=thisSliceHpx;
+      slice.getContext('2d').drawImage(mainCanvas, 0,srcYpx, mainCanvas.width,thisSliceHpx, 0,0, mainCanvas.width,thisSliceHpx);
+
+      const sliceHmm=thisSliceHpx*mmPerPx;
+      pdf.addImage(slice.toDataURL('image/jpeg',0.88),'JPEG', mg, mg+hdrH+4, contentW, sliceHmm);
+
+      srcYpx+=thisSliceHpx;
+      pageNum++;
     }
+
     pdf.save(filename);
     return true;
   } finally {
